@@ -70,25 +70,55 @@ async function request(path, options = {}) {
 // PUBLIC_INTERFACE
 export async function login(email, password) {
   /** Perform login; returns { access_token, user } and stores token in memory. */
-  const data = await request("/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ email, password }),
-  });
-  if (data?.access_token) setAccessToken(data.access_token);
-  return data;
+  try {
+    const data = await request("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    });
+    if (data?.access_token) setAccessToken(data.access_token);
+    return data;
+  } catch (e) {
+    if (e?.status === 404 || e?.status === 405) {
+      // Try OAuth2 password flow at /auth/token
+      const form = new URLSearchParams();
+      form.set("username", email);
+      form.set("password", password);
+      const tokenData = await request("/auth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form.toString(),
+      });
+      if (tokenData?.access_token) setAccessToken(tokenData.access_token);
+      // Optionally fetch profile
+      let user = null;
+      try { user = await request("/auth/me", { method: "GET" }); } catch {}
+      return { access_token: tokenData?.access_token, user };
+    }
+    throw e;
+  }
 }
 
 // PUBLIC_INTERFACE
 export async function register(email, password) {
   /** Perform registration; returns { message } or new user; does not auto-login by default. */
-  return request("/auth/register", {
-    method: "POST",
-    body: JSON.stringify({
-      email,
-      password,
-      emailRedirectTo: process.env.REACT_APP_SITE_URL,
-    }),
-  });
+  try {
+    return await request("/auth/register", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        password,
+        emailRedirectTo: process.env.REACT_APP_SITE_URL,
+      }),
+    });
+  } catch (e) {
+    if (e?.status === 404 || e?.status === 405) {
+      return request("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+    }
+    throw e;
+  }
 }
 
 // PUBLIC_INTERFACE
@@ -100,35 +130,89 @@ export async function getProfile() {
 // PUBLIC_INTERFACE
 export async function listConversations() {
   /** Get list of conversations for the current user. */
-  return request("/conversations", { method: "GET" });
+  try {
+    return await request("/conversations", { method: "GET" });
+  } catch (e) {
+    if (e?.status === 404) {
+      return request("/chat/conversations", { method: "GET" });
+    }
+    throw e;
+  }
 }
 
 // PUBLIC_INTERFACE
 export async function createConversation(title) {
   /** Create a new conversation; returns conversation object. */
-  return request("/conversations", {
-    method: "POST",
-    body: JSON.stringify({ title }),
-  });
+  try {
+    return await request("/conversations", {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    });
+  } catch (e) {
+    if (e?.status === 404) {
+      return request("/chat/conversations", {
+        method: "POST",
+        body: JSON.stringify({ title }),
+      });
+    }
+    throw e;
+  }
 }
 
 // PUBLIC_INTERFACE
 export async function getConversation(conversationId) {
   /** Get conversation details including messages. */
-  return request(`/conversations/${conversationId}`, { method: "GET" });
+  try {
+    return await request(`/conversations/${conversationId}`, { method: "GET" });
+  } catch (e) {
+    if (e?.status === 404) {
+      const msgs = await request(`/chat/conversations/${conversationId}/messages`, { method: "GET" });
+      return {
+        id: String(conversationId),
+        title: "Chat",
+        messages: Array.isArray(msgs) ? msgs : [],
+      };
+    }
+    throw e;
+  }
 }
 
 // PUBLIC_INTERFACE
 export async function sendMessage(conversationId, message) {
   /** Send user message; returns updated assistant message and state. */
-  return request(`/conversations/${conversationId}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ content: message }),
-  });
+  try {
+    return await request(`/conversations/${conversationId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content: message }),
+    });
+  } catch (e) {
+    if (e?.status === 404) {
+      const arr = await request(`/chat/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content: message, session_id: conversationId }),
+      });
+      // Convert to assistant reply
+      return Array.isArray(arr) ? { messages: arr } : arr;
+    }
+    throw e;
+  }
 }
 
+/**
+ * Attempt GET first; if it fails with 405/404, fallback to POST body as some backends require POST /rag/search
+ */
 // PUBLIC_INTERFACE
 export async function searchKnowledge(query) {
   /** Perform a RAG/semantic search to show related results (optional helper). */
-  return request(`/rag/search?q=${encodeURIComponent(query)}`, { method: "GET" });
+  try {
+    return await request(`/rag/search?q=${encodeURIComponent(query)}`, { method: "GET" });
+  } catch (e) {
+    if (e?.status === 405 || e?.status === 404) {
+      return request(`/rag/search`, {
+        method: "POST",
+        body: JSON.stringify({ query, top_k: 3 }),
+      });
+    }
+    throw e;
+  }
 }
